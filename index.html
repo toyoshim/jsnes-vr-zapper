@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<style>
+body {
+	margin: 0;
+}
+canvas {
+	display: block;
+}
+</style>
+<script type="text/javascript" src="node_modules/jsnes/dist/jsnes.js"></script>
+</head>
+
+<body>
+<script type="module">
+import * as THREE from './node_modules/three/build/three.module.js';
+import { BoxLineGeometry } from './node_modules/three/examples/jsm/geometries/BoxLineGeometry.js';
+import { XRControllerModelFactory } from './node_modules/three/examples/jsm/webxr/XRControllerModelFactory.js';
+import { VRButton } from './node_modules/three/examples/jsm/webxr/VRButton.js';
+
+// Initialize NES
+const canvas = document.createElement('canvas');
+canvas.width = 256;
+canvas.height = 224;
+const context = canvas.getContext('2d');
+const data = context.createImageData(canvas.width, canvas.height);
+const u32 = new Uint32Array(data.data.buffer);
+const nes = new jsnes.NES({
+  onFrame: buffer => {
+    let i = 0;
+    for (let y = 0; y < 240; ++y) {
+      for (let x = 0; x < 256; ++x) {
+        u32[i] = 0xff000000 | buffer[i];
+        ++i;
+      }
+    }
+    context.putImageData(data, 0, 0);
+  },
+  onAudioSample: (l, r) => {
+  }
+});
+const url = './dh.nes';
+const request = new XMLHttpRequest();
+let booted = false;
+request.responseType = 'arraybuffer';
+request.onload = () => {
+  const u8 = new Uint8Array(request.response);
+  request.response.indexOf = () => { return 0; };
+  request.response.charCodeAt = i => { return u8[i]; };
+  nes.loadROM(request.response);
+  booted = true;
+};
+request.open('GET', url, true);
+request.send();
+
+// Initialize Scene
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x101020);
+
+// Room
+const room = new THREE.LineSegments(
+  new BoxLineGeometry(8, 4, 10, 8, 4, 10),
+  new THREE.LineBasicMaterial( { color: 0xff0000 })
+);
+room.geometry.translate(0, 2, 0);
+scene.add(room);
+
+// Monitor
+const monitor = new THREE.Mesh(
+  new THREE.PlaneGeometry(4, 3),
+  new THREE.MeshBasicMaterial({
+    map: new THREE.CanvasTexture(canvas)
+  })
+);
+monitor.translateY(1.5);
+monitor.translateZ(-4);
+monitor.transparent = false;
+scene.add(monitor);
+
+// Ball for debugging the pointer on the screen
+const ball = new THREE.Mesh(
+  new THREE.IcosahedronBufferGeometry(0.1, 2),
+  new THREE.MeshLambertMaterial({ color: 0x00ff00 })
+);
+ball.translateY(1.5);
+ball.translateZ(-4);
+//scene.add(ball);
+
+// Lighting
+scene.add(new THREE.HemisphereLight(0x606060, 0x404040));
+const light = new THREE.DirectionalLight(0xffffff);
+light.position.set(1, 1, 1).normalize();
+scene.add(light);
+
+// Initialize Camera
+const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(0, 1.6, 3);
+
+// Initialize Rendeerr
+const renderer = new THREE.WebGLRenderer( { antialias: true } );
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+// Initialize VR Button
+const button = VRButton.createButton(renderer);
+document.body.appendChild(button);
+
+// Initialize Controller
+const controller = renderer.xr.getController(0);
+controller.addEventListener('connected', e => {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, -3], 3));
+  geometry.setAttribute('color', new THREE.Float32BufferAttribute([1.0, 0.0, 0.0, 0, 0, 0], 3));
+  controller.add(new THREE.Line(
+    geometry,
+    new THREE.LineBasicMaterial({ vertexColors: true, blending: THREE.AdditiveBlending })
+  ));
+});
+controller.addEventListener('disconnected', e => {
+  controller.remove(controller.children[0]);
+});
+const controllerState = {
+  pulled: false,
+  releaseTime: 0.0
+}
+controller.addEventListener('selectstart', e => {
+  controllerState.pulled = true;
+  // Zapper's capacitor is designed to hold the trigger pulse for 100ms.
+  controllerState.releaseTime = performance.now() + 100;
+});
+scene.add(controller);
+
+const controllerFactory = new XRControllerModelFactory();
+const controllerGrip = renderer.xr.getControllerGrip(0);
+controllerGrip.add(controllerFactory.createControllerModel(controllerGrip));
+scene.add(controllerGrip);
+
+// Start
+renderer.setAnimationLoop(render);
+
+function render() {
+  if (booted) {
+    const v = new THREE.Vector3(0, 0, -1);
+    v.applyQuaternion(controller.quaternion);
+    const d = (-4 - controller.position.z) / v.z;
+    let x = controller.position.x + v.x * d;
+    let y = controller.position.y + v.y * d;
+    ball.position.x = -1000;
+    nes.mmap.zapperX = null;
+    nes.mmap.zapperY = null;
+    if (-2 < x && x < 2 && 0 < y && y < 3) {
+      ball.position.x = x;
+      ball.position.y = y;
+      nes.mmap.zapperX = ((x + 2) / 4 * 256) | 0;
+      nes.mmap.zapperY = (y  / 3 * 224) | 0;
+    }
+    nes.mmap.zapperFired = controllerState.pulled;
+    nes.frame();
+    monitor.material.map.needsUpdate = true;
+  }
+  if (controllerState.pulled) {
+    if (performance.now() > controllerState.releaseTime)
+      controllerState.pulled = false;
+  }
+  renderer.render(scene, camera);
+}
+</script>
+</body>
+</html>
