@@ -1,6 +1,6 @@
 {
   "dependencies": {
     "jsnes": "^1.1.0",
-    "three": "^0.118.3"
+    "three": "^0.137.0"
   }
 }
